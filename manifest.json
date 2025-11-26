@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "ETC Invoices CSV Downloader",
+  "version": "1.0",
+  "description": "ETA Invoices Downloader Extension",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "webNavigation",
+    "scripting"
+  ],
+  "action": {
+    "default_title": "Click to inject CSV downloader Option"
+    },
+   "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

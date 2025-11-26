@@ -1,0 +1,629 @@
+// Main download function
+async function downloadCSV(startDate, endDate, searchQuery) {
+
+    // Get access token from localStorage
+    let access_token;
+    try {
+        const userData = JSON.parse(localStorage.getItem('USER_DATA'));
+        access_token = userData.access_token;
+        if (!access_token) {
+            throw new Error('Access token not found');
+        }
+    } catch (error) {
+        alert('Unable to get access token. Please make sure you are logged in.');
+        throw error;
+    }
+
+    console.log('Starting data fetch...');
+    const allData = await fetchAllData(access_token, startDate, endDate, searchQuery);
+
+    if (allData.length > 0) {
+        console.log('Converting to CSV...');
+        const csv = convertToCSV(allData);
+
+        console.log('Downloading CSV...');
+        await triggerDownload(csv, `documents_${startDate.split('T')[0]}_to_${endDate.split('T')[0]}.csv`);
+    } else {
+        alert('No data to export');
+    }
+}
+
+
+
+// Detailed invoices
+
+
+// Function to process document object and prepare data for CSV
+function processDocumentForCSV(fdoc) {
+    const keys_needed_from_object = [
+        'uuid', 'internalID', 'status', 'submissionUUID', 
+        'dateTimeIssued', 'totalAmount', 'netAmount', 'totalSales', 'documentTypeNameSecondaryLang'
+    ];
+    
+    const invoicesLinesdicts_key = [
+        'itemPrimaryName', 'itemPrimaryDescription', 'itemSecondaryName', 
+        'itemSecondaryDescription', 'salesTotalForeign', 'netTotalForeign', 
+        'totalForeign', 'description', 'itemCode', 'itemType', 'quantity', 
+        'internalCode', 'netTotal', 'total', 'itemsDiscount'
+    ];
+    
+    const invoices_all = [];
+    
+    // Extract main invoice values
+    const invoice_values = {};
+    keys_needed_from_object.forEach(key => {
+        invoice_values[key] = fdoc[key] || null;
+    });
+    
+    invoice_values['receiver_name'] = fdoc['receiver']['name'];
+    invoice_values['receiver_address_street'] = fdoc['receiver']['address']['street'];
+
+    invoice_values['issuer_name'] = fdoc['issuer']['name'];
+    invoice_values['issuer_address_street'] = fdoc['issuer']['address']['street'];
+    invoice_values['issuer_id'] = fdoc['issuer']['id'];
+    // Calculate total taxes
+    if (fdoc.taxTotals && Array.isArray(fdoc.taxTotals)) {
+        invoice_values['tax_totals'] = fdoc.taxTotals.reduce((sum, tax) => sum + (tax.amount || 0), 0);
+        
+        // Add individual tax types
+        fdoc.taxTotals.forEach(tax => {
+            invoice_values[`tax_${tax.taxType}`] = tax.amount || 0;
+        });
+    }
+    
+    // Process each invoice line
+    if (fdoc.invoiceLines && Array.isArray(fdoc.invoiceLines)) {
+        fdoc.invoiceLines.forEach(invoiceLine => {
+            // Copy main invoice values
+            const invoice_needed = { ...invoice_values };
+            
+            // Extract invoice line details
+            const invoice_details = {};
+            invoicesLinesdicts_key.forEach(key => {
+                invoice_details[key] = invoiceLine[key] || null;
+            });
+            
+            // Add unit value
+            if (invoiceLine.unitValue) {
+                invoice_details['uniteValue_amountEGP'] = invoiceLine.unitValue.amountEGP || null;
+            }
+            
+            // Add discount details
+            if (invoiceLine.discount) {
+                invoice_details['discount_rate'] = invoiceLine.discount.rate || 0;
+                invoice_details['discount_amount'] = invoiceLine.discount.amount || 0;
+            }
+            
+            // Add line tax details
+            if (invoiceLine.lineTaxableItems && Array.isArray(invoiceLine.lineTaxableItems)) {
+                invoiceLine.lineTaxableItems.forEach(tax => {
+                    invoice_details[`tax_${tax.taxType}_rate`] = tax.rate || 0;
+                    invoice_details[`tax_${tax.taxType}_amount`] = tax.amount || 0;
+                });
+            }
+            
+            // Merge all details
+            Object.assign(invoice_needed, invoice_details);
+            invoices_all.push(invoice_needed);
+        });
+    }
+    
+    return invoices_all;
+}
+
+
+// Function to fetch and process multiple documents (async version)
+async function fetchAndProcessMultipleDocuments(linksArray) {
+    console.log(`Starting to fetch ${linksArray.length} documents...`);
+    
+    let successCount = 0;
+    let failCount = 0;
+    const access_token = JSON.parse(localStorage.getItem('USER_DATA')).access_token;
+    // Create an array of promises for all fetch operations
+    const fetchPromises = linksArray.map(async (link, i) => {
+        try {
+            // Getting the real link
+            console.log(`Fetching document ${i + 1}/${linksArray.length}: ${link}`);
+            
+            // Regular expression to extract document ID and token
+            const regex = /documents\/(.*?)\/share\/(.*)/;
+            const matches = link.match(regex);
+            
+            if (!matches) {
+                console.log('No match found.');
+                return [];
+            }
+            
+            const documentId = matches[1];
+            const token = matches[2];
+            const newUrl = `https://api-portal.invoicing.eta.gov.eg/api/v1/documents/${documentId}/details?documentLinesLimit=100`
+            console.log('newUrl:', newUrl);
+            
+            // Fetch the document
+            const response = await fetch(newUrl, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${access_token}`,
+                    'Accept-Language': 'en',
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error(`HTTP error! Status: ${response.status}`);
+            }
+            
+            const rawText = await response.text();
+            const fdoc = JSON.parse(rawText);
+            
+            // Process the document
+            const processedData = processDocumentForCSV(fdoc);
+            successCount++;
+            console.log(`✓ Document ${i + 1} processed: ${processedData.length} lines added`);
+            
+            return processedData;
+            
+        } catch (error) {
+            failCount++;
+            console.error(`✗ Failed to fetch/process document ${i + 1}:`, error);
+            return []; // Return empty array on error
+        }
+    });
+    
+    // Wait for all promises to complete
+    const results = await Promise.all(fetchPromises);
+    
+    // Flatten the array of arrays into a single array
+    const allProcessedData = results.flat();
+    
+    console.log(`\nFetch complete: ${successCount} successful, ${failCount} failed`);
+    console.log(`Total processed lines: ${allProcessedData.length}`);
+    
+    return allProcessedData;
+}
+
+// Main function to execute everything
+async function fetchProcessAndDownload(linksArray, filename) {
+
+    // Fetch and process all documents
+    if(linksArray.length===0){
+        console.log('linksArray is Empty.');
+        return;
+    }
+    const allProcessedData = await fetchAndProcessMultipleDocuments(linksArray);
+    
+    if (allProcessedData.length === 0) {
+        console.log('No data to export');
+        return;
+    }
+    
+    // Convert to CSV
+    console.log('Converting to CSV...');
+    const csv = convertToCSV(allProcessedData);
+    
+    // Download
+    filename = `detailed_invoices_${filename}`;
+    await triggerDownload(csv, filename);
+    
+    console.log(`✓ CSV downloaded: ${filename}`);
+}
+
+
+async function confirmDownloadDetailedInvoices(urls, filename) {
+    // Show a confirmation dialog
+    if(urls.length ===0){
+        console.log('no urlArray data provided.');
+        return;
+    }
+    const userResponse = window.confirm("Do you want to download the details CSV?");
+    
+    if (userResponse) {
+        changeBtnState(false, added_details='Detailed Invoices ');
+        await fetchProcessAndDownload(urls, filename);
+        changeBtnState(true);
+    } else {
+        // User clicked 'No'
+        console.log("Download canceled.");
+    }
+}
+
+
+
+
+// Helper function to extract publicUrl column from CSV
+function extractPublicUrlsFromCSV(csvContent) {
+    const lines = csvContent.split('\n');
+    
+    if (lines.length === 0) {
+        return [];
+    }
+    
+    // Parse header row to find publicUrl column index
+    const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
+    const publicUrlIndex = headers.indexOf('publicUrl');
+    
+    if (publicUrlIndex === -1) {
+        console.log('publicUrl column not found in CSV');
+        return [];
+    }
+    
+    // Extract publicUrl values from each row (skip header)
+    const publicUrls = [];
+    for (let i = 1; i < lines.length; i++) {
+        if (lines[i].trim() === '') continue; // Skip empty lines
+        
+        const values = lines[i].split(',').map(v => v.replace(/"/g, '').trim());
+        if (values[publicUrlIndex] && values[publicUrlIndex] !== '') {
+            publicUrls.push(values[publicUrlIndex]);
+        }
+    }
+    
+    return publicUrls;
+}
+
+
+// Function to find the target div
+function findTargetDiv() {
+    const toolBarDiv = document.querySelector('div[role="toolbar"]');
+    return toolBarDiv;
+}
+
+// Disable & Enabling btn
+function changeBtnState(enable_btn=false, added_details=''){
+    const button = document.getElementById('csv-download-btn');
+    
+    if (!button) {
+        console.error('Button with id "csv-download-btn" not found');
+        return;
+    }
+    
+    if (enable_btn){
+        button.textContent = 'Download as CSV';
+        button.disabled = false;
+    } else {
+        button.textContent = `Downloading ${added_details}...`;
+        button.disabled = true;
+    }
+}
+
+// Function to create and inject the download Div
+function injectDownloadContainer() {
+    // Check if button already exists
+    if (document.getElementById('csv-download-container')) {
+        return;
+    }
+
+    const targetDiv = findTargetDiv();
+    if (!targetDiv) {
+        console.log('Target div not found, will retry...');
+        return;
+    }
+
+    // Create a container div
+    const container = document.createElement('div');
+    container.id = 'csv-download-container';
+    container.style.cssText = `
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-left: 10px;
+        flex-wrap: wrap;
+        min-width: fit-content;
+        flex-shrink: 0;
+    `;
+
+    // Query input label
+    const queryLabel = document.createElement('span');
+    queryLabel.textContent = 'Query:';
+    queryLabel.style.cssText = `
+        font-size: 14px;
+        font-weight: 500;
+        white-space: nowrap;
+        flex-shrink: 0;
+    `;
+
+    // Query input field
+    const queryInput = document.createElement('input');
+    queryInput.type = 'text';
+    queryInput.id = 'csv-query-input';
+    queryInput.placeholder = 'Enter query...';
+    queryInput.style.cssText = `
+        padding: 6px 10px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 14px;
+        min-width: 200px;
+        flex-shrink: 0;
+    `;
+
+    const startLabel = document.createElement('span');
+    startLabel.textContent = 'Date From:';
+    startLabel.style.cssText = `
+        font-size: 14px;
+        font-weight: 500;
+        white-space: nowrap;
+        flex-shrink: 0;
+    `;
+
+    // Create start date input
+    const startDateInput = document.createElement('input');
+    startDateInput.type = 'date';
+    startDateInput.id = 'csv-start-date';
+    startDateInput.value = new Date(Date.now() - 86400000).toISOString().split('T')[0]; // Yesterday
+    startDateInput.style.cssText = `
+        padding: 6px 10px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 14px;
+        flex-shrink: 0;
+    `;
+
+    const endLabel = document.createElement('span');
+    endLabel.textContent = 'Date To:';
+    endLabel.style.cssText = `
+        font-size: 14px;
+        font-weight: 500;
+        white-space: nowrap;
+        flex-shrink: 0;
+    `;
+
+    // Create end date input
+    const endDateInput = document.createElement('input');
+    endDateInput.type = 'date';
+    endDateInput.id = 'csv-end-date';
+    endDateInput.value = new Date().toISOString().split('T')[0]; // Today
+    endDateInput.style.cssText = `
+        padding: 6px 10px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 14px;
+        flex-shrink: 0;
+    `;
+
+    // Create the button
+    const button = document.createElement('button');
+    button.id = 'csv-download-btn';
+    button.textContent = 'Download as CSV';
+    button.style.cssText = `
+        padding: 8px 16px;
+        margin-left: 10px;
+        background-color: #0078d4;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 500;
+        transition: background-color 0.2s;
+        flex-shrink: 0;
+        white-space: nowrap;
+    `;
+
+    // Hover effect
+    button.onmouseover = () => button.style.backgroundColor = '#106ebe';
+    button.onmouseout = () => button.style.backgroundColor = '#0078d4';
+
+    // Click handler
+    button.onclick = async () => {
+        // Get query value
+        const query = queryInput.value.trim();
+        
+        // Get dates from inputs
+        const startDateValue = new Date(startDateInput.value);
+        startDateValue.setDate(startDateValue.getDate() - 1);
+        const startDate = startDateValue.toISOString().split('T')[0] + 'T22:00:00.000Z';
+        const endDate = endDateInput.value + 'T21:59:59.999Z';
+        
+        changeBtnState(false);
+        
+        try {
+            await downloadCSV(startDate, endDate, query); 
+            //button.textContent = 'Downloaded!';
+            setTimeout(() => {
+                changeBtnState(enable_btn=true);
+            }, 2000);
+        } catch (error) {
+            console.error('Download failed:', error);
+            button.textContent = 'Download Failed';
+            button.style.backgroundColor = '#d13438';
+            setTimeout(() => {
+                button.style.backgroundColor = '#0078d4';
+                changeBtnState(true);
+            }, 3000);
+        }
+    };
+
+    // Add all elements to container in order
+    container.appendChild(document.createElement('br'));
+    
+    container.appendChild(queryLabel);
+    container.appendChild(queryInput);
+    container.appendChild(startLabel);
+    container.appendChild(startDateInput);
+    container.appendChild(endLabel);
+    container.appendChild(endDateInput);
+    container.appendChild(button);
+
+    // Append container to the target div
+    targetDiv.prepend(container);
+
+    console.log('CSV download Div injected successfully');
+}
+
+
+// Function to flatten lineItems array into separate columns
+function retrieveNeededOfFullInvoice(data) {
+
+  const result = {
+    publicUrl: data.publicUrl,
+    id: data.id,
+    status: data.source.documentStatusAR,
+    statusEn: data.source.documentStatusEN,
+    internalId: data.source.internalId, 
+    submissionDate: data.source.submissionDate,
+    documentTypeNameEn: data.source.documentTypeNameEn, 
+    documentTypeNameAr:  data.source.documentTypeNameAr,
+    submitterId: data.source.submitterId, 
+    submitterName: data.source.submitterName,
+    recipientId: data.source.recipientId,
+    recipientName: data.source.recipientName,
+    totalInvoiceAmount: data.source.totalInvoiceAmount,
+    totalSales: data.source.totalSales,
+    netAmount: data.source.totalSales,
+    taxTotals: null
+
+  };
+    total_taxes = 0;
+    if(data.source.taxTotals){
+    data.source.taxTotals.forEach((tax, index) => {
+          Object.keys(tax).forEach((taxKey) => {
+            result[`taxTotals_${index}_${taxKey}`] = tax[taxKey];
+            if(taxKey =='amount'){
+                total_taxes += tax[taxKey]
+            }
+          });
+        
+      } )
+    result.taxTotals = total_taxes;
+    }
+    return result;
+}
+
+
+// Function to make a GET request for a specific page
+async function fetchPage(pageNumber, access_token, startDate, endDate, searchQuery) {
+    searchQuery = searchQuery.trim()
+    if(searchQuery.length > 0){
+        url_fetch_documents = `https://api-portal.invoicing.eta.gov.eg/api/v1/documents/search?Query=${searchQuery}&IssueDateFrom=${startDate}&IssueDateTo=${endDate}&Page=${pageNumber}&PageSize=100`;
+        }else{
+        url_fetch_documents = `https://api-portal.invoicing.eta.gov.eg/api/v1/documents/search?IssueDateFrom=${startDate}&IssueDateTo=${endDate}&Page=${pageNumber}&PageSize=100`;
+        }
+
+    console.log(`Fetching page ${pageNumber}...`);
+
+    const response = await fetch(url_fetch_documents, {
+        method: 'GET',
+        headers: {
+            'Authorization': `Bearer ${access_token}`,
+            'Content-Type': 'application/json'
+        }
+    });
+
+    console.log(`Response status: ${response.status}`);
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`HTTP error! Status: ${response.status}`, errorText);
+        throw new Error(`HTTP error! Status: ${response.status}`);
+    }
+
+    const rawText = await response.text();
+    const data = JSON.parse(rawText);
+    return data;
+}
+
+async function fetchAllData(access_token, startDate, endDate, searchQuery) {
+    console.log('Fetching first page to get total pages...');
+
+    const firstPage = await fetchPage(1, access_token, startDate, endDate, searchQuery);
+    if (!firstPage) {
+        throw new Error('Failed to fetch first page');
+    }
+
+    console.log('First page data structure:', firstPage);
+
+    const totalPages = firstPage.metadata.totalPages;
+    console.log(`Total pages: ${totalPages}`);
+
+    let allSources = [];
+
+    // Add sources from first page
+    if (firstPage.result && Array.isArray(firstPage.result)) {
+        console.log(`First page has ${firstPage.result.length} results`);
+        firstPage.result.forEach(item => {
+        if (item) {
+            // Flatten the lineItems
+            allSources.push(retrieveNeededOfFullInvoice(item));
+        }
+        });
+    }
+
+    // Fetch remaining pages
+    for (let page = 2; page <= totalPages; page++) {
+        console.log(`Fetching page ${page} of ${totalPages}...`);
+        const pageData = await fetchPage(page, access_token, startDate, endDate, searchQuery);
+
+        if (pageData && pageData.result && Array.isArray(pageData.result)) {
+            pageData.result.forEach(item => {
+                if (item.source) {
+                    allSources.push(retrieveNeededOfFullInvoice(item));
+                }
+            });
+        }
+
+        // Add a small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    console.log(`Total records retrieved: ${allSources.length}`);
+    return allSources;
+}
+
+// Function to convert array of objects to CSV
+function convertToCSV(data) {
+    if (data.length === 0) {
+        return '';
+    }
+
+    const allKeys = new Set();
+    data.forEach(obj => {
+        Object.keys(obj).forEach(key => allKeys.add(key));
+    });
+
+    const headers = Array.from(allKeys);
+    const csvHeader = headers.map(h => `"${h}"`).join(',');
+
+    const csvRows = data.map(obj => {
+        return headers.map(header => {
+            const value = obj[header];
+            if (value === null || value === undefined) {
+                return '""';
+            }
+            if (typeof value === 'object') {
+                return `"${JSON.stringify(value).replace(/"/g, '""')}"`;
+            }
+            return `"${String(value).replace(/"/g, '""')}"`;
+        }).join(',');
+    });
+
+    return [csvHeader, ...csvRows].join('\n');
+}
+
+
+// Function to trigger download
+async function triggerDownload(csvContent, filename) {
+
+    const publicUrls = extractPublicUrlsFromCSV(csvContent);
+    console.log(`Extracted ${publicUrls.length} public URLs:`, publicUrls);
+
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    // return csvContent;
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+
+    link.setAttribute('href', url);
+    link.setAttribute('download', filename);
+    link.style.visibility = 'hidden';
+
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    console.log(`CSV file "${filename}" downloaded successfully!`);
+
+    await confirmDownloadDetailedInvoices(publicUrls, filename);
+    
+}
+
+
+injectDownloadContainer();
