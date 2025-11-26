@@ -2,6 +2,10 @@
 
 A browser extension that helps you download multiple documents in bulk and export detailed information in CSV format.
 
+## Screenshot
+
+![Extension Screenshot](./screenshots/pic.png)
+
 ## Features
 
 - **Bulk Document Download**: Download several documents at once with a single click
