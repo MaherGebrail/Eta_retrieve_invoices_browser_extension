@@ -21,3 +21,16 @@ chrome.action.onClicked.addListener(async (tab) => {
     console.error('Failed to inject script:', error);
   }
 });
+
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === "downloadFiles") {
+    request.files.forEach(file => {
+      chrome.downloads.download({
+        url: file,
+        conflictAction: 'uniquify'
+      });
+    });
+    sendResponse({status: "Downloads started"});
+  }
+});

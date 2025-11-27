@@ -1,7 +1,16 @@
 // Main download function
-async function downloadCSV(startDate, endDate, searchQuery) {
-
+async function downloadCSV(startDate, endDate, searchQuery, downloadOverAll=true, downloadDetailed=true) {
+    
     // Get access token from localStorage
+    console.log(`downloadOverAllInvoice: ${downloadOverAll}, downloadDetailedInvoices: ${downloadDetailed}`);
+    if (!downloadOverAll && !downloadDetailed) {
+        changeBtnState(false, 'Select a download option', mouseOutColor='#ff9800', mouseOutColor='#4CAF50');
+        setTimeout(() => {
+            changeBtnState(true);
+        }, 3000);
+        return;
+    }
+    changeBtnState(false);
     let access_token;
     try {
         const userData = JSON.parse(localStorage.getItem('USER_DATA'));
@@ -16,23 +25,46 @@ async function downloadCSV(startDate, endDate, searchQuery) {
 
     console.log('Starting data fetch...');
     const allData = await fetchAllData(access_token, startDate, endDate, searchQuery);
-
-    if (allData.length > 0) {
+    const filename_date = `${startDate.split('T')[0]}_to_${endDate.split('T')[0]}`;
+    if (allData.length > 0){
         console.log('Converting to CSV...');
-        const csv = convertToCSV(allData);
+        const overAllInvoicesCSV = convertToCSV(allData);
+        
+        if (downloadOverAll){
+            console.log('Downloading CSV...');
+            await triggerDownload(overAllInvoicesCSV, `documents_${filename_date}.csv`);
+        }
+        
+        if(downloadDetailed){
+            const detailedInvoicesUrls = extractUrlsFromCSV(overAllInvoicesCSV);
+            console.log(`Extracted ${detailedInvoicesUrls.length} URLs`);
+            
+            changeBtnState(false, 'Downloading Detailed Invoices ...');
+            
+            const allProcessedData = await fetchAndProcessMultipleDocuments(detailedInvoicesUrls);
+            
+            // Convert to CSV
+            console.log('Converting to CSV...');
+            const csv_detailed = convertToCSV(allProcessedData);
+            
+            // Download
+            const filename = `detailed_invoices_${filename_date}.csv`;
+            await triggerDownload(csv_detailed, filename);
 
-        console.log('Downloading CSV...');
-        await triggerDownload(csv, `documents_${startDate.split('T')[0]}_to_${endDate.split('T')[0]}.csv`);
+        }
+        
     } else {
         alert('No data to export');
     }
+
+    setTimeout(() => {
+            changeBtnState(enable_btn=true);
+        }, 2000);
 }
 
 
 
 // Detailed invoices
-
-
 // Function to process document object and prepare data for CSV
 function processDocumentForCSV(fdoc) {
     const keys_needed_from_object = [
@@ -123,7 +155,7 @@ async function fetchAndProcessMultipleDocuments(linksArray) {
     const fetchPromises = linksArray.map(async (link, i) => {
         try {
             // Getting the real link
-            console.log(`Fetching document ${i + 1}/${linksArray.length}: ${link}`);
+            // console.log(`Fetching document ${i + 1}/${linksArray.length}: ${link}`);
             
             // Regular expression to extract document ID and token
             const regex = /documents\/(.*?)\/share\/(.*)/;
@@ -137,7 +169,7 @@ async function fetchAndProcessMultipleDocuments(linksArray) {
             const documentId = matches[1];
             const token = matches[2];
             const newUrl = `https://api-portal.invoicing.eta.gov.eg/api/v1/documents/${documentId}/details?documentLinesLimit=100`
-            console.log('newUrl:', newUrl);
+            //console.log('newUrl:', newUrl);
             
             // Fetch the document
             const response = await fetch(newUrl, {
@@ -182,56 +214,9 @@ async function fetchAndProcessMultipleDocuments(linksArray) {
     return allProcessedData;
 }
 
-// Main function to execute everything
-async function fetchProcessAndDownload(linksArray, filename) {
 
-    // Fetch and process all documents
-    if(linksArray.length===0){
-        console.log('linksArray is Empty.');
-        return;
-    }
-    const allProcessedData = await fetchAndProcessMultipleDocuments(linksArray);
-    
-    if (allProcessedData.length === 0) {
-        console.log('No data to export');
-        return;
-    }
-    
-    // Convert to CSV
-    console.log('Converting to CSV...');
-    const csv = convertToCSV(allProcessedData);
-    
-    // Download
-    filename = `detailed_invoices_${filename}`;
-    await triggerDownload(csv, filename);
-    
-    console.log(`✓ CSV downloaded: ${filename}`);
-}
-
-
-async function confirmDownloadDetailedInvoices(urls, filename) {
-    // Show a confirmation dialog
-    if(urls.length ===0){
-        console.log('no urlArray data provided.');
-        return;
-    }
-    const userResponse = window.confirm("Do you want to download the details CSV?");
-    
-    if (userResponse) {
-        changeBtnState(false, added_details='Detailed Invoices ');
-        await fetchProcessAndDownload(urls, filename);
-        changeBtnState(true);
-    } else {
-        // User clicked 'No'
-        console.log("Download canceled.");
-    }
-}
-
-
-
-
-// Helper function to extract publicUrl column from CSV
-function extractPublicUrlsFromCSV(csvContent) {
+// Helper function to extract Url column from CSV
+function extractUrlsFromCSV(csvContent) {
     const lines = csvContent.split('\n');
     
     if (lines.length === 0) {
@@ -264,12 +249,20 @@ function extractPublicUrlsFromCSV(csvContent) {
 
 // Function to find the target div
 function findTargetDiv() {
-    const toolBarDiv = document.querySelector('div[role="toolbar"]');
+    var toolBarDiv = document.querySelector('div[role="toolbar"]');
+    let count_check = 0;
+    while (!toolBarDiv && count_check < 3){
+        console.log('Target div not found, will retry...')
+        setTimeout(
+            () => toolBarDiv = document.querySelector('div[role="toolbar"]')
+        , 3000);
+        count_check++;
+    }
     return toolBarDiv;
 }
 
-// Disable & Enabling btn
-function changeBtnState(enable_btn=false, added_details=''){
+// Function to Change btn behavior
+function changeBtnState(enable_btn=false, btn_content='Downloading ...', mouseOutColor='#0078d4', mouseOverColor='#106ebe'){
     const button = document.getElementById('csv-download-btn');
     
     if (!button) {
@@ -277,11 +270,15 @@ function changeBtnState(enable_btn=false, added_details=''){
         return;
     }
     
+    // Hover effect
+    button.style.backgroundColor = mouseOverColor;
+    button.onmouseout = () => button.style.backgroundColor = mouseOutColor;
+    
     if (enable_btn){
         button.textContent = 'Download as CSV';
         button.disabled = false;
     } else {
-        button.textContent = `Downloading ${added_details}...`;
+        button.textContent = btn_content;
         button.disabled = true;
     }
 }
@@ -295,17 +292,16 @@ function injectDownloadContainer() {
 
     const targetDiv = findTargetDiv();
     if (!targetDiv) {
-        console.log('Target div not found, will retry...');
         return;
     }
 
     // Create a container div
-    const container = document.createElement('div');
-    container.id = 'csv-download-container';
-    container.style.cssText = `
+    const dateAndDownloadBtn = document.createElement('div');
+    dateAndDownloadBtn.id = 'csv-download-container';
+    dateAndDownloadBtn.style.cssText = `
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 15px;
         margin-left: 10px;
         flex-wrap: wrap;
         min-width: fit-content;
@@ -380,6 +376,76 @@ function injectDownloadContainer() {
         flex-shrink: 0;
     `;
 
+
+       // Create checkbox container
+    const queryAndDownloadOptionContainer = document.createElement('div');
+    queryAndDownloadOptionContainer.style.cssText = `
+        display: flex;
+        align-items: center;
+        gap: 15px;
+        margin-left: 10px;
+        flex-wrap: wrap;
+        min-width: fit-content;
+        flex-shrink: 0;
+    `;
+
+    // Create "Download Overall Invoices" checkbox
+    const overallCheckboxWrapper = document.createElement('label');
+    overallCheckboxWrapper.style.cssText = `
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        cursor: pointer;
+        font-size: 14px;
+        white-space: nowrap;
+    `;
+
+    const overAllCheckbox = document.createElement('input');
+    overAllCheckbox.type = 'checkbox';
+    overAllCheckbox.id = 'download-overall-invoices';
+    overAllCheckbox.checked = true;
+    overAllCheckbox.style.cssText = `
+        cursor: pointer;
+        width: 16px;
+        height: 16px;
+    `;
+
+    const overallLabel = document.createElement('span');
+    overallLabel.textContent = 'Download Overall Invoices';
+
+    overallCheckboxWrapper.appendChild(overAllCheckbox);
+    overallCheckboxWrapper.appendChild(overallLabel);
+
+    // Create "Download Detailed Invoices" checkbox
+    const detailedCheckboxWrapper = document.createElement('label');
+    detailedCheckboxWrapper.style.cssText = `
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        cursor: pointer;
+        font-size: 14px;
+        white-space: nowrap;
+    `;
+
+    const detailedCheckbox = document.createElement('input');
+    detailedCheckbox.type = 'checkbox';
+    detailedCheckbox.id = 'download-detailed-invoices';
+    detailedCheckbox.checked = true;
+    detailedCheckbox.style.cssText = `
+        cursor: pointer;
+        width: 16px;
+        height: 16px;
+    `;
+
+    const detailedLabel = document.createElement('span');
+    detailedLabel.textContent = 'Download Detailed Invoices';
+
+    detailedCheckboxWrapper.appendChild(detailedCheckbox);
+    detailedCheckboxWrapper.appendChild(detailedLabel);
+
+    queryAndDownloadOptionContainer.appendChild(overallCheckboxWrapper);
+    queryAndDownloadOptionContainer.appendChild(detailedCheckboxWrapper);
+
     // Create the button
     const button = document.createElement('button');
     button.id = 'csv-download-btn';
@@ -399,53 +465,49 @@ function injectDownloadContainer() {
         white-space: nowrap;
     `;
 
-    // Hover effect
-    button.onmouseover = () => button.style.backgroundColor = '#106ebe';
-    button.onmouseout = () => button.style.backgroundColor = '#0078d4';
-
+    changeBtnState(true);
+    
     // Click handler
     button.onclick = async () => {
-        // Get query value
-        const query = queryInput.value.trim();
-        
-        // Get dates from inputs
-        const startDateValue = new Date(startDateInput.value);
-        startDateValue.setDate(startDateValue.getDate() - 1);
-        const startDate = startDateValue.toISOString().split('T')[0] + 'T22:00:00.000Z';
-        const endDate = endDateInput.value + 'T21:59:59.999Z';
-        
-        changeBtnState(false);
-        
-        try {
-            await downloadCSV(startDate, endDate, query); 
-            //button.textContent = 'Downloaded!';
-            setTimeout(() => {
-                changeBtnState(enable_btn=true);
-            }, 2000);
-        } catch (error) {
-            console.error('Download failed:', error);
-            button.textContent = 'Download Failed';
-            button.style.backgroundColor = '#d13438';
-            setTimeout(() => {
-                button.style.backgroundColor = '#0078d4';
-                changeBtnState(true);
-            }, 3000);
-        }
+    // Get query value
+    const query = queryInput.value.trim();
+    
+    // Get dates from inputs
+    const startDateValue = new Date(startDateInput.value);
+    startDateValue.setDate(startDateValue.getDate() - 1);
+    const startDate = startDateValue.toISOString().split('T')[0] + 'T22:00:00.000Z';
+    const endDate = endDateInput.value + 'T21:59:59.999Z';
+    const downloadDetailedInvoices = detailedCheckbox.checked;
+    const downloadOverAllInvoices = overAllCheckbox.checked;
+    
+    try {
+        await downloadCSV(startDate, endDate, query, 
+            downloadOverAllInvoices,  
+            downloadDetailedInvoices); 
+    } catch (error) {
+        console.error('Download failed:', error);
+        button.textContent = 'Download Failed';
+        button.style.backgroundColor = '#d13438';
+        setTimeout(() => {
+            button.style.backgroundColor = '#0078d4';
+            changeBtnState(true);
+        }, 3000);
+    }
     };
 
     // Add all elements to container in order
-    container.appendChild(document.createElement('br'));
-    
-    container.appendChild(queryLabel);
-    container.appendChild(queryInput);
-    container.appendChild(startLabel);
-    container.appendChild(startDateInput);
-    container.appendChild(endLabel);
-    container.appendChild(endDateInput);
-    container.appendChild(button);
+    queryAndDownloadOptionContainer.appendChild(queryLabel);
+    queryAndDownloadOptionContainer.appendChild(queryInput);
+
+    dateAndDownloadBtn.appendChild(startLabel);
+    dateAndDownloadBtn.appendChild(startDateInput);
+    dateAndDownloadBtn.appendChild(endLabel);
+    dateAndDownloadBtn.appendChild(endDateInput);
+    dateAndDownloadBtn.appendChild(button);
 
     // Append container to the target div
-    targetDiv.prepend(container);
+    targetDiv.prepend(dateAndDownloadBtn);
+    targetDiv.prepend(queryAndDownloadOptionContainer);
 
     console.log('CSV download Div injected successfully');
 }
@@ -499,7 +561,7 @@ async function fetchPage(pageNumber, access_token, startDate, endDate, searchQue
         url_fetch_documents = `https://api-portal.invoicing.eta.gov.eg/api/v1/documents/search?IssueDateFrom=${startDate}&IssueDateTo=${endDate}&Page=${pageNumber}&PageSize=100`;
         }
 
-    console.log(`Fetching page ${pageNumber}...`);
+    // console.log(`Fetching page ${pageNumber}...`);
 
     const response = await fetch(url_fetch_documents, {
         method: 'GET',
@@ -603,10 +665,6 @@ function convertToCSV(data) {
 // Function to trigger download
 async function triggerDownload(csvContent, filename) {
 
-    const publicUrls = extractPublicUrlsFromCSV(csvContent);
-    console.log(`Extracted ${publicUrls.length} public URLs:`, publicUrls);
-
-
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     // return csvContent;
     const link = document.createElement('a');
@@ -621,7 +679,6 @@ async function triggerDownload(csvContent, filename) {
     document.body.removeChild(link);
     console.log(`CSV file "${filename}" downloaded successfully!`);
 
-    await confirmDownloadDetailedInvoices(publicUrls, filename);
     
 }
 
