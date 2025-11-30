@@ -145,9 +145,10 @@ function processDocumentForCSV(fdoc) {
 
 
 // Function to fetch and process multiple documents (async version)
-async function fetchAndProcessMultipleDocuments(linksArray) {
-    console.log(`Starting to fetch ${linksArray.length} documents...`);
-    
+async function fetchAndProcessMultipleDocuments(linksArray, gotArray=true) {
+    if (gotArray){
+        console.log(`Starting to fetch ${linksArray.length} documents...`);
+    }
     let successCount = 0;
     let failCount = 0;
     const access_token = JSON.parse(localStorage.getItem('USER_DATA')).access_token;
@@ -155,7 +156,6 @@ async function fetchAndProcessMultipleDocuments(linksArray) {
     const fetchPromises = linksArray.map(async (link, i) => {
         try {
             // Getting the real link
-            // console.log(`Fetching document ${i + 1}/${linksArray.length}: ${link}`);
             
             // Regular expression to extract document ID and token
             const regex = /documents\/(.*?)\/share\/(.*)/;
@@ -168,7 +168,7 @@ async function fetchAndProcessMultipleDocuments(linksArray) {
             
             const documentId = matches[1];
             const token = matches[2];
-            const newUrl = `https://api-portal.invoicing.eta.gov.eg/api/v1/documents/${documentId}/details?documentLinesLimit=100`
+            const newUrl = `https://api-portal.invoicing.eta.gov.eg/api/v1/documents/${documentId}/details?documentLinesLimit=100`;
             //console.log('newUrl:', newUrl);
             
             // Fetch the document
@@ -185,14 +185,14 @@ async function fetchAndProcessMultipleDocuments(linksArray) {
                 throw new Error(`HTTP error! Status: ${response.status}`);
             }
             
-            const rawText = await response.text();
-            const fdoc = JSON.parse(rawText);
+            const json_received = await response.json();
             
             // Process the document
-            const processedData = processDocumentForCSV(fdoc);
+            const processedData = processDocumentForCSV(json_received);
             successCount++;
-            console.log(`✓ Document ${i + 1} processed: ${processedData.length} lines added`);
-            
+            if (gotArray){
+                console.log(`✓ Document ${i + 1} processed: ${processedData.length} lines added`);
+            }
             return processedData;
             
         } catch (error) {
@@ -207,10 +207,10 @@ async function fetchAndProcessMultipleDocuments(linksArray) {
     
     // Flatten the array of arrays into a single array
     const allProcessedData = results.flat();
-    
-    console.log(`\nFetch complete: ${successCount} successful, ${failCount} failed`);
-    console.log(`Total processed lines: ${allProcessedData.length}`);
-    
+    if(gotArray){
+        console.log(`\nFetch complete: ${successCount} successful, ${failCount} failed`);
+        console.log(`Total processed lines: ${allProcessedData.length}`);
+    }
     return allProcessedData;
 }
 
@@ -266,7 +266,7 @@ function changeBtnState(enable_btn=false, btn_content='Downloading ...', mouseOu
     const button = document.getElementById('csv-download-btn');
     
     if (!button) {
-        console.error('Button with id "csv-download-btn" not found');
+        console.log('Button with id "csv-download-btn" not found');
         return;
     }
     
@@ -465,7 +465,6 @@ function injectDownloadContainer() {
         white-space: nowrap;
     `;
 
-    changeBtnState(true);
     
     // Click handler
     button.onclick = async () => {
@@ -508,13 +507,14 @@ function injectDownloadContainer() {
     // Append container to the target div
     targetDiv.prepend(dateAndDownloadBtn);
     targetDiv.prepend(queryAndDownloadOptionContainer);
+    changeBtnState(true);
 
     console.log('CSV download Div injected successfully');
 }
 
 
 // Function to flatten lineItems array into separate columns
-function retrieveNeededOfFullInvoice(data) {
+async function retrieveNeededOfFullInvoice(data) {
 
   const result = {
     publicUrl: data.publicUrl,
@@ -531,22 +531,34 @@ function retrieveNeededOfFullInvoice(data) {
     recipientName: data.source.recipientName,
     totalInvoiceAmount: data.source.totalInvoiceAmount,
     totalSales: data.source.totalSales,
-    netAmount: data.source.totalSales,
-    taxTotals: null
+    netAmount: data.source.netAmount,
+    taxTotals: (data.source.totalInvoiceAmount - data.source.netAmount).toFixed(2)
 
   };
+       
     total_taxes = 0;
     if(data.source.taxTotals){
     data.source.taxTotals.forEach((tax, index) => {
           Object.keys(tax).forEach((taxKey) => {
             result[`taxTotals_${index}_${taxKey}`] = tax[taxKey];
             if(taxKey =='amount'){
-                total_taxes += tax[taxKey]
+                total_taxes += tax[taxKey];
             }
           });
-        
-      } )
-    result.taxTotals = total_taxes;
+      })
+    }
+
+    if (total_taxes == 0){
+        got_data = await fetchAndProcessMultipleDocuments([result.publicUrl], false);
+        got_data = got_data[0];
+        if('tax_T1' in got_data){
+        result[`taxTotals_0_type`] = 'T1';     
+        result[`taxTotals_0_amount`] = got_data.tax_T1;
+        }
+        if ('tax_T2' in got_data){
+        result[`taxTotals_1_type`] = 'T2';
+        result[`taxTotals_1_amount`] = got_data.tax_T2 || null;
+        }
     }
     return result;
 }
@@ -602,10 +614,10 @@ async function fetchAllData(access_token, startDate, endDate, searchQuery) {
     // Add sources from first page
     if (firstPage.result && Array.isArray(firstPage.result)) {
         console.log(`First page has ${firstPage.result.length} results`);
-        firstPage.result.forEach(item => {
+        firstPage.result.forEach(async(item) => {
         if (item) {
             // Flatten the lineItems
-            allSources.push(retrieveNeededOfFullInvoice(item));
+            allSources.push(await retrieveNeededOfFullInvoice(item));
         }
         });
     }
@@ -616,9 +628,9 @@ async function fetchAllData(access_token, startDate, endDate, searchQuery) {
         const pageData = await fetchPage(page, access_token, startDate, endDate, searchQuery);
 
         if (pageData && pageData.result && Array.isArray(pageData.result)) {
-            pageData.result.forEach(item => {
+            pageData.result.forEach(async(item) => {
                 if (item.source) {
-                    allSources.push(retrieveNeededOfFullInvoice(item));
+                    allSources.push(await retrieveNeededOfFullInvoice(item));
                 }
             });
         }
@@ -684,3 +696,4 @@ async function triggerDownload(csvContent, filename) {
 
 
 injectDownloadContainer();
+
